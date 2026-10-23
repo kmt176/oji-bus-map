@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>王子駅バス地図</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script>
+  // ===== ここだけ書き換える =====
+  // Apps Script をウェブアプリとしてデプロイしたときの URL（…/exec）を入れる
+  const GAS_URL = ''; // 例: 'https://script.google.com/macros/s/XXXXXXXX/exec'
+</script>
+<style>
+  :root { --ink:#222; --sub:#666; --bg:#fff; --line:#ddd; }
+  * { box-sizing:border-box; }
+  html, body { margin:0; height:100%; font-family:system-ui,-apple-system,"Hiragino Sans","Noto Sans JP",sans-serif; color:var(--ink); background:var(--bg); }
+  body { display:flex; flex-direction:column; }
+  header { padding:10px 14px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:10px; }
+  header h1 { margin:0; font-size:20px; }
+  header small { color:var(--sub); font-size:13px; }
+  #map { flex:1; min-height:0; }
+  #msg { display:none; position:absolute; top:64px; left:12px; right:12px; z-index:1000; background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px 14px; font-size:16px; box-shadow:0 2px 8px rgba(0,0,0,.15); }
+  #sheet { border-top:1px solid var(--line); max-height:45vh; overflow:auto; padding:12px 14px calc(12px + env(safe-area-inset-bottom)); display:none; }
+  #sheet h2 { margin:0 0 8px; font-size:20px; display:flex; justify-content:space-between; align-items:center; }
+  #sheet h2 button { font-size:16px; padding:6px 12px; border:1px solid var(--line); background:#fff; border-radius:8px; }
+  .route { display:flex; align-items:center; gap:10px; width:100%; text-align:left; font-size:18px; padding:12px 10px; margin:6px 0; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); }
+  .route.on { border-width:3px; }
+  .chip { flex:none; width:14px; height:28px; border-radius:4px; }
+  .route b { flex:none; min-width:4.2em; }
+  .route span { color:var(--sub); font-size:16px; }
+  .pin { width:34px; height:34px; border-radius:50%; background:#fff; border:3px solid var(--ink); display:flex; align-items:center; justify-content:center; font-size:15px; font-weight:700; }
+  .pin.sel { background:var(--ink); color:#fff; }
+</style>
+</head>
+<body>
+<header><h1>王子駅バス地図</h1><small>都営バスのみ表示</small></header>
+<div id="map"></div>
+<div id="msg"></div>
+<div id="sheet"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const OJI = [35.75282, 139.73784];
+const PALETTE = ['#e6194b','#3cb44b','#4363d8','#f58231','#911eb4','#42a5b5','#d6338a','#8a6d00','#008080','#9a6324','#000075','#808000'];
+
+const map = L.map('map', { zoomControl:false }).setView(OJI, 17);
+L.control.zoom({ position:'bottomright' }).addTo(map);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom:19, attribution:'&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+const msg = document.getElementById('msg');
+const sheet = document.getElementById('sheet');
+let data, colorOf = {}, lines = {}, pins = {}, selStop = null, selRoute = null;
+
+function showMsg(t) { msg.textContent = t; msg.style.display = 'block'; }
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+// 行き先：路線の備考（例「王40甲:池袋駅東口行」）から取り、なければ終点名
+function destOf(r) {
+  const m = r.note && r.note.match(/[:：](.+)$/);
+  return (m ? m[1] : r.note) || (r.dest ? r.dest + '行' : '');
+}
+
+async function load() {
+  if (!GAS_URL) { showMsg('バス停の情報を読み込めませんでした'); return; }
+  try {
+    const res = await fetch(GAS_URL);
+    data = await res.json();
+    if (data.error || !data.stops || !data.stops.length) throw new Error(data.error || 'empty');
+  } catch (e) {
+    console.error(e);
+    showMsg('バス停の情報を読み込めませんでした');
+    return;
+  }
+  draw();
+}
+
+function draw() {
+  // 系統名（例：王40）ごとに色を決める
+  const titles = [...new Set(data.routes.map(r => r.title))].sort();
+  titles.forEach((t, i) => colorOf[t] = PALETTE[i % PALETTE.length]);
+
+  data.routes.forEach(r => {
+    lines[r.id] = L.polyline(r.path, { color:colorOf[r.title], weight:5, opacity:.8 })
+      .addTo(map).on('click', () => highlight(r.id));
+  });
+
+  const bounds = [];
+  data.stops.forEach(s => {
+    const icon = L.divIcon({ className:'', html:`<div class="pin">${esc(s.num || '●')}</div>`, iconSize:[34,34], iconAnchor:[17,17] });
+    pins[s.id] = L.marker([s.lat, s.lng], { icon }).addTo(map).on('click', () => openStop(s));
+    bounds.push([s.lat, s.lng]);
+  });
+  if (bounds.length) map.fitBounds(bounds, { padding:[40,40], maxZoom:17 });
+}
+
+function openStop(s) {
+  if (selStop) pins[selStop].getElement().firstChild.classList.remove('sel');
+  selStop = s.id;
+  pins[s.id].getElement().firstChild.classList.add('sel');
+
+  const rs = s.routes.map(id => data.routes.find(r => r.id === id)).filter(Boolean)
+    .sort((a, b) => a.title.localeCompare(b.title, 'ja'));
+  sheet.innerHTML = `<h2>${esc(s.name)}${s.num ? ' ' + esc(s.num) + '番' : ''}<button id="close">閉じる</button></h2>` +
+    (rs.length ? rs.map(r => `<button class="route" data-id="${esc(r.id)}" style="border-color:${colorOf[r.title]}">
+       <i class="chip" style="background:${colorOf[r.title]}"></i><b>${esc(r.title)}</b><span>${esc(destOf(r))}</span></button>`).join('')
+     : '<p>この乗り場の路線情報はありません</p>');
+  sheet.style.display = 'block';
+  sheet.querySelectorAll('.route').forEach(b => b.onclick = () => highlight(b.dataset.id));
+  document.getElementById('close').onclick = closeStop;
+  markRoute();
+  map.invalidateSize();
+}
+
+function closeStop() {
+  if (selStop) pins[selStop].getElement().firstChild.classList.remove('sel');
+  selStop = null;
+  sheet.style.display = 'none';
+  highlight(null);
+  map.invalidateSize();
+}
+
+// 路線をタップ：その路線だけ強調。もう一度タップで元に戻す
+function highlight(id) {
+  selRoute = (id && id !== selRoute) ? id : null;
+  Object.entries(lines).forEach(([rid, l]) => {
+    if (!selRoute) l.setStyle({ weight:5, opacity:.8 });
+    else if (rid === selRoute) { l.setStyle({ weight:9, opacity:1 }); l.bringToFront(); }
+    else l.setStyle({ weight:3, opacity:.12 });
+  });
+  markRoute();
+}
+
+function markRoute() {
+  sheet.querySelectorAll('.route').forEach(b => b.classList.toggle('on', b.dataset.id === selRoute));
+}
+
+load();
+</script>
+</body>
+</html>
