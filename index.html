@@ -63,6 +63,7 @@ function destOf(r) {
 
 async function load() {
   if (!GAS_URL) { showMsg('バス停の情報を読み込めませんでした'); return; }
+  showMsg('バス停の情報を読み込み中…');
   try {
     const res = await fetch(GAS_URL);
     data = await res.json();
@@ -72,6 +73,7 @@ async function load() {
     showMsg('バス停の情報を読み込めませんでした');
     return;
   }
+  msg.style.display = 'none';
   draw();
 }
 

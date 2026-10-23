@@ -4,6 +4,9 @@
  * ・ODPT のキーはスクリプトプロパティ「ODPT_KEY」から読む（コードには書かない）
  * ・王子駅周辺の都営バスの乗り場と、そこを通る路線をまとめて JSON で返す
  * ・バス停と路線は変化が少ないので 6 時間キャッシュする
+ * ・路線の線は OSRM（OpenStreetMap の道路で経路を計算する無料サービス）で道路に沿わせる。
+ *   取れなかった区間はバス停どうしを直線で結ぶ
+ * ・経路計算は 1 分ほどかかるので、setupTrigger を一度実行して 5 時間ごとに先に作っておく
  *
  * デプロイ：「ウェブアプリ」／実行ユーザー「自分」／アクセス「全員」
  * 呼び出し：<デプロイURL>          … キャッシュがあればキャッシュを返す
@@ -14,7 +17,8 @@ var ODPT_BASE = 'https://api.odpt.org/api/v4/';
 var OJI = { lat: 35.75282, lng: 139.73784 }; // 王子駅
 var STOP_RADIUS = 350;   // この範囲の乗り場をピンにする（m）
 var LINE_RADIUS = 4000;  // 路線の線を描く範囲（m、ODPT の上限）
-var CACHE_KEY = 'oji_v1';
+var CACHE_KEY = 'oji_v2';
+var OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving/';
 var CACHE_SEC = 6 * 60 * 60;
 
 function doGet(e) {
@@ -89,6 +93,16 @@ function build_() {
     };
   });
 
+  // 5) 線を道路に沿わせる（同じ並びの区間は 1 回だけ計算する）
+  var roadCache = {};
+  routes.forEach(function (r) {
+    r.path = r.path.map(function (seg) {
+      var k = JSON.stringify(seg);
+      if (!roadCache[k]) roadCache[k] = roadPath_(seg) || seg;
+      return roadCache[k];
+    });
+  });
+
   var stops = near.map(function (p) {
     return {
       id: p['owl:sameAs'],
@@ -101,6 +115,27 @@ function build_() {
   });
 
   return { updated: new Date().toISOString(), center: OJI, stops: stops, routes: routes };
+}
+
+/**
+ * バス停の並び [[lat,lng],...] を OSRM で道路に沿った線にする。失敗したら null。
+ * OSRM の公開サーバーは 1 秒に 1 回までなので、呼ぶたびに 1 秒待つ。
+ */
+function roadPath_(seg) {
+  var coords = seg.map(function (c) { return c[1] + ',' + c[0]; }).join(';');
+  var url = OSRM_BASE + coords + '?overview=full&geometries=geojson&continue_straight=true';
+  Utilities.sleep(1000);
+  try {
+    var res = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (res.getResponseCode() !== 200) return null;
+    var d = JSON.parse(res.getContentText());
+    if (d.code !== 'Ok' || !d.routes || !d.routes[0]) return null;
+    return d.routes[0].geometry.coordinates.map(function (c) {
+      return [Math.round(c[1] * 1e5) / 1e5, Math.round(c[0] * 1e5) / 1e5];
+    });
+  } catch (err) {
+    return null;
+  }
 }
 
 function isToei_(p) {
@@ -156,8 +191,26 @@ function cacheGet_(key) {
   return out;
 }
 
+/** キャッシュを作り直す（時間で動くトリガーから呼ぶ） */
+function refreshCache() {
+  cachePut_(CACHE_KEY, JSON.stringify(build_()), CACHE_SEC);
+}
+
+/** 一度だけ実行：5 時間ごとに refreshCache を動かすトリガーを作り、今すぐキャッシュも作る */
+function setupTrigger() {
+  ScriptApp.getProjectTriggers().forEach(function (t) {
+    if (t.getHandlerFunction() === 'refreshCache') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('refreshCache').timeBased().everyHours(5).create();
+  refreshCache();
+}
+
 /** エディタから実行して動作確認する用（ログに件数が出る） */
 function testBuild() {
   var d = build_();
-  Logger.log('乗り場 ' + d.stops.length + ' 件 / 路線 ' + d.routes.length + ' 件');
+  var pts = d.routes.reduce(function (n, r) {
+    return n + r.path.reduce(function (m, seg) { return m + seg.length; }, 0);
+  }, 0);
+  Logger.log('乗り場 ' + d.stops.length + ' 件 / 路線 ' + d.routes.length + ' 件 / 線の点 ' + pts + ' 個 / ' +
+             Math.round(JSON.stringify(d).length / 1024) + 'KB');
 }
