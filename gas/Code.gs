@@ -9,8 +9,9 @@
  * ・経路計算は 1 分ほどかかるので、setupTrigger を一度実行して 5 時間ごとに先に作っておく
  *
  * デプロイ：「ウェブアプリ」／実行ユーザー「自分」／アクセス「全員」
- * 呼び出し：<デプロイURL>          … キャッシュがあればキャッシュを返す
- *           <デプロイURL>?refresh=1 … キャッシュを使わず取り直す
+ * 呼び出し：<デプロイURL>             … 乗り場と路線（キャッシュがあればキャッシュを返す）
+ *           <デプロイURL>?refresh=1    … キャッシュを使わず取り直す
+ *           <デプロイURL>?type=status  … 路線ごとの遅れ・運休の推定（2 分キャッシュ）
  */
 
 var ODPT_BASE = 'https://api.odpt.org/api/v4/';
@@ -22,6 +23,11 @@ var OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving/';
 var CACHE_SEC = 6 * 60 * 60;
 
 function doGet(e) {
+  if (e && e.parameter && e.parameter.type === 'status') {
+    var st;
+    try { st = status_(); } catch (err) { st = JSON.stringify({ error: String(err && err.message || err) }); }
+    return ContentService.createTextOutput(st).setMimeType(ContentService.MimeType.JSON);
+  }
   var refresh = e && e.parameter && e.parameter.refresh === '1';
   var json = refresh ? null : cacheGet_(CACHE_KEY);
   if (!json) {
@@ -193,7 +199,9 @@ function cacheGet_(key) {
 
 /** キャッシュを作り直す（時間で動くトリガーから呼ぶ） */
 function refreshCache() {
-  cachePut_(CACHE_KEY, JSON.stringify(build_()), CACHE_SEC);
+  var d = build_();
+  cachePut_(CACHE_KEY, JSON.stringify(d), CACHE_SEC);
+  timetables_(d.routes.map(function (r) { return r.id; }), true);
 }
 
 /** 一度だけ実行：5 時間ごとに refreshCache を動かすトリガーを作り、今すぐキャッシュも作る */
@@ -213,4 +221,188 @@ function testBuild() {
   }, 0);
   Logger.log('乗り場 ' + d.stops.length + ' 件 / 路線 ' + d.routes.length + ' 件 / 線の点 ' + pts + ' 個 / ' +
              Math.round(JSON.stringify(d).length / 1024) + 'KB');
+}
+
+/* ===================== 遅れ・運休の推定 ===================== */
+
+var STATUS_KEY = 'oji_status_v1';
+var STATUS_SEC = 120;          // 走行データのキャッシュ（秒）
+var MIN_FEED_BUSES = 50;       // 都営バス全体でこれ未満なら走行データ自体が不調とみなす
+
+/** 路線パターンごとの遅れ（分）と運休の推定を JSON 文字列で返す */
+function status_() {
+  var cached = CacheService.getScriptCache().get(STATUS_KEY);
+  if (cached) return cached;
+
+  var key = PropertiesService.getScriptProperties().getProperty('ODPT_KEY');
+  var main = cacheGet_(CACHE_KEY);
+  if (!main) { refreshCache(); main = cacheGet_(CACHE_KEY); }
+  var ids = JSON.parse(main).routes.map(function (r) { return r.id; });
+  var tt = timetables_(ids, false);
+
+  var buses = odpt_('odpt:Bus', { 'odpt:operator': 'odpt.Operator:Toei' }, key);
+  var feedOk = buses.length >= MIN_FEED_BUSES;
+  var now = jstMin_(new Date());
+
+  var out = {};
+  ids.forEach(function (id) {
+    var p = tt[id] || { poles: [], trips: {} };
+    // 時刻表上いま走っているはずの便の数
+    var expected = 0;
+    Object.keys(p.trips).forEach(function (tid) {
+      var t = p.trips[tid].filter(function (v) { return v >= 0; });
+      if (t.length && t[0] <= now && now <= t[t.length - 1]) expected++;
+    });
+    out[id] = { delay: null, buses: 0, expected: expected, suspended: false };
+  });
+
+  buses.forEach(function (b) {
+    var id = b['odpt:busroutePattern'];
+    if (!out[id] || !tt[id]) return;
+    out[id].buses++;
+    var d = busDelay_(b, tt[id], now);
+    if (d != null && (out[id].delay == null || d > out[id].delay)) out[id].delay = d;
+  });
+
+  ids.forEach(function (id) {
+    var o = out[id];
+    // 走っているはずの便が 2 本以上あるのに 1 台も見えない → 運休の可能性（推測）
+    o.suspended = feedOk && o.expected >= 2 && o.buses === 0;
+  });
+
+  var json = JSON.stringify({ updated: new Date().toISOString(), feedOk: feedOk, patterns: out });
+  CacheService.getScriptCache().put(STATUS_KEY, json, STATUS_SEC);
+  return json;
+}
+
+/** 1 台のバスの遅れ（分）。比べられないときは null */
+function busDelay_(b, p, now) {
+  var pole = b['odpt:fromBusstopPole'], at = b['odpt:fromBusstopPoleTime'];
+  if (!pole || !at) return null;
+  var act = jstMin_(new Date(at));
+  if (now - act > 60) return null;           // 古すぎる記録は使わない
+  var idxs = [];
+  p.poles.forEach(function (pid, i) { if (pid === pole) idxs.push(i); });
+  if (!idxs.length) return null;
+
+  var best = null;
+  var tid = shortTt_(b['odpt:busTimetable']);
+  if (tid && p.trips[tid]) {
+    // 便が分かるときはその便の時刻と比べる
+    idxs.forEach(function (i) {
+      var s = p.trips[tid][i];
+      if (s >= 0 && (best == null || Math.abs(act - s) < Math.abs(best))) best = act - s;
+    });
+  } else {
+    // 便が分からないときは、その乗り場をいちばん近い過去に出るはずだった便と比べる
+    Object.keys(p.trips).forEach(function (k) {
+      idxs.forEach(function (i) {
+        var s = p.trips[k][i];
+        if (s < 0) return;
+        var d = act - s;
+        if (d >= -3 && (best == null || d < best)) best = d;
+      });
+    });
+  }
+  if (best == null || best > 90) return null;
+  return Math.max(0, Math.round(best));
+}
+
+/**
+ * 今日の時刻表を路線パターンごとにまとめる。{ id: { poles:[乗り場ID], trips:{ 便ID:[分,...] } } }
+ * 分は 0 時からの分。深夜 3 時までは前日の続きとして 24 時以降の数にする。
+ */
+function timetables_(ids, force) {
+  var day = serviceDay_();
+  var ckey = 'oji_tt_' + day.key;
+  if (!force) {
+    var c = cacheGet_(ckey);
+    if (c) return JSON.parse(c);
+  }
+  var key = PropertiesService.getScriptProperties().getProperty('ODPT_KEY');
+  var out = {};
+  var reqs = ids.map(function (id) {
+    return { url: url_('odpt:BusTimetable', { 'odpt:busroutePattern': id }, key), muteHttpExceptions: true };
+  });
+  for (var i = 0; i < reqs.length; i += 10) {
+    var res = UrlFetchApp.fetchAll(reqs.slice(i, i + 10));
+    res.forEach(function (r, j) {
+      var id = ids[i + j];
+      out[id] = { poles: [], trips: {} };
+      if (r.getResponseCode() !== 200) return;
+      JSON.parse(r.getContentText()).forEach(function (t) {
+        if (day.calendars.indexOf(t['odpt:calendar']) < 0) return;
+        var objs = (t['odpt:busTimetableObject'] || []).slice().sort(function (a, b) {
+          return a['odpt:index'] - b['odpt:index'];
+        });
+        var times = [], prev = -1;
+        objs.forEach(function (o, k) {
+          if (!out[id].poles[k]) out[id].poles[k] = o['odpt:busstopPole'];
+          var hm = o['odpt:departureTime'] || o['odpt:arrivalTime'];
+          var m = hm ? hmMin_(hm) : -1;
+          if (m >= 0 && prev >= 0 && m < prev - 600) m += 1440;  // 日付をまたぐ便
+          if (m >= 0) prev = m;
+          times.push(m);
+        });
+        if (times.length && times[0] >= 0 && times[0] < 180) {
+          times = times.map(function (v) { return v >= 0 ? v + 1440 : v; });
+        }
+        out[id].trips[shortTt_(t['owl:sameAs'])] = times;
+      });
+    });
+  }
+  cachePut_(ckey, JSON.stringify(out), CACHE_SEC);
+  return out;
+}
+
+/** 運行日（深夜 3 時まで前日扱い）と、その日に使う時刻表の種類 */
+function serviceDay_() {
+  var d = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  var ymd = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
+  var dow = Number(Utilities.formatDate(d, 'Asia/Tokyo', 'u')); // 1=月 … 7=日
+  var holiday = dow === 7 || isHoliday_(ymd);
+  var cals = holiday ? ['odpt.Calendar:Holiday', 'odpt.Calendar:SaturdayHoliday', 'odpt.Calendar:Sunday']
+           : dow === 6 ? ['odpt.Calendar:Saturday', 'odpt.Calendar:SaturdayHoliday']
+           : ['odpt.Calendar:Weekday'];
+  return { key: ymd, calendars: cals };
+}
+
+function isHoliday_(ymd) {
+  try {
+    var cal = CalendarApp.getCalendarById('ja.japanese#holiday@group.v.calendar.google.com');
+    var p = ymd.split('-');
+    return cal.getEventsForDay(new Date(Number(p[0]), Number(p[1]) - 1, Number(p[2]))).length > 0;
+  } catch (err) {
+    return false;
+  }
+}
+
+function hmMin_(hm) {
+  var p = String(hm).split(':');
+  return Number(p[0]) * 60 + Number(p[1]);
+}
+
+/** 日本時間の 0 時からの分（深夜 3 時までは 24 時以降の数） */
+function jstMin_(date) {
+  var m = hmMin_(Utilities.formatDate(date, 'Asia/Tokyo', 'HH:mm'));
+  return m < 180 ? m + 1440 : m;
+}
+
+function shortTt_(id) {
+  return id ? String(id).replace('odpt.BusTimetable:', '') : '';
+}
+
+/** エディタから実行して動作確認する用：遅れ・運休の推定をログに出す */
+function testStatus() {
+  CacheService.getScriptCache().remove(STATUS_KEY);
+  var d = JSON.parse(status_());
+  var ps = d.patterns, ids = Object.keys(ps);
+  var running = ids.filter(function (id) { return ps[id].buses > 0; }).length;
+  Logger.log('走行データ ' + (d.feedOk ? '正常' : '不調') + ' / 路線 ' + ids.length + ' 件中 ' + running + ' 件でバスを確認');
+  ids.forEach(function (id) {
+    var o = ps[id];
+    if (o.delay || o.suspended) {
+      Logger.log(id + ' 遅れ ' + o.delay + ' 分 / 走行 ' + o.buses + ' 台 / 予定 ' + o.expected + ' 便' + (o.suspended ? ' / 運休の可能性' : ''));
+    }
+  });
 }
