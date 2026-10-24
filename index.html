@@ -28,8 +28,9 @@
   #sheet { border-top:1px solid var(--line); max-height:45vh; overflow:auto; padding:12px 14px calc(12px + env(safe-area-inset-bottom)); display:none; }
   #sheet h2 { margin:0 0 8px; font-size:20px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
   #sheet h2 button { flex:none; font-size:16px; padding:8px 14px; border:1px solid var(--line); background:#fff; border-radius:8px; }
-  #bar { display:flex; gap:8px; padding:8px 14px; border-bottom:1px solid var(--line); }
-  #bar button { font-size:16px; padding:10px 12px; border:2px solid var(--line); background:#fff; color:var(--ink); border-radius:10px; }
+  #bar { display:flex; gap:6px; padding:8px 14px; border-bottom:1px solid var(--line); }
+  #bar button { white-space:nowrap; font-size:15px; padding:10px 8px; border:2px solid var(--line); background:#fff; color:var(--ink); border-radius:10px; }
+  #bar #delays.alert { border-color:var(--alert); color:var(--alert); font-weight:700; }
   #bar button.on { border-color:var(--ink); background:var(--ink); color:#fff; }
   #bar .seg { display:flex; flex:1; }
   #bar .seg button { flex:1; }
@@ -72,9 +73,10 @@
 <div id="bar">
   <div class="seg"><button id="dirFrom">王子駅から</button><button id="dirTo">王子駅へ</button></div>
   <button id="favOnly">★だけ</button>
+  <button id="delays">遅れ</button>
 </div>
 <div id="search">
-  <input id="q" type="search" placeholder="行き先・通る停留所で探す（例：池袋）" enterkeyhint="search" autocomplete="off">
+  <input id="q" type="search" placeholder="行き先・停留所で探す" enterkeyhint="search" autocomplete="off">
   <button id="mic" aria-label="声で入力">🎤</button>
 </div>
 <div id="map"></div>
@@ -106,7 +108,9 @@ const sheet = document.getElementById('sheet');
 let currentStop = null;
 let data, colorOf = {}, lines = {}, pins = {}, stopById = {}, selStop = null, selRoute = null;
 let status = {}; // 路線パターンID → { delay, suspended, ... }
-let along = [];   // 線の途中のバス停の丸
+let along = [];
+let statusAt = null; // 遅れ情報を取った時刻
+let delayMode = false; // 遅れ一覧を表示中   // 線の途中のバス停の丸
 
 // 表示の設定（このスマホに覚えておく）
 function loadPref(k, def) { try { const v = localStorage.getItem('ojibus.' + k); return v == null ? def : JSON.parse(v); } catch (e) { return def; } }
@@ -134,7 +138,7 @@ function matchesQuery(r) { return !query || r.names.includes(query); }
 function ojiStopsOf(r) { return data.stops.filter(s => s.routes.includes(r.id)); }
 
 function showResults() {
-  currentStop = null;
+  currentStop = null; delayMode = false;
   const rs = data.routes.filter(isVisible).sort((a, b) => a.title.localeCompare(b.title, 'ja'));
   const shown = document.getElementById('q').value.trim();
   sheet.innerHTML = `<h2>「${esc(shown)}」へ行く路線 ${rs.length}件<button id="close">閉じる</button></h2>` +
@@ -153,6 +157,38 @@ function showResults() {
   });
   document.getElementById('close').onclick = closeStop;
   map.invalidateSize();
+}
+
+// 遅れ・運休の可能性がある路線の一覧（遅れが大きい順、運休の可能性は先頭）
+function showDelays() {
+  currentStop = null; delayMode = true;
+  const rs = data.routes.filter(r => isAlert(r.id) && (dir === 'from' ? r.fromOji !== false : r.toOji !== false))
+    .sort((a, b) => (isSuspended(b.id) - isSuspended(a.id)) || ((status[b.id].delay || 0) - (status[a.id].delay || 0)));
+  const at = statusAt ? `${statusAt.getHours()}:${String(statusAt.getMinutes()).padStart(2, '0')}更新` : 'まだ取得していません';
+  sheet.innerHTML = `<h2>遅れ・運休の可能性 ${rs.length}件<button id="close">閉じる</button></h2>` +
+    (rs.length ? rs.map(r => {
+      const st = ojiStopsOf(r);
+      const where = st.length ? '乗り場：' + st.map(stopLabel).join('、') : '';
+      return `<div class="row"><button class="route" data-id="${esc(r.id)}" style="border-color:${ALERT}">
+        <i class="chip" style="background:${ALERT}"></i><b>${esc(r.title)}</b><span>${esc(destOf(r))}<small>${esc(where)}</small></span><em>${esc(alertText(r.id))}</em></button></div>`;
+    }).join('') : `<p>${DELAY_ALERT_MIN}分以上遅れている路線はありません。</p>`) +
+    `<p class="note">${esc(at)}（${dir === 'from' ? '王子駅から' : '王子駅へ'}の路線）${rs.some(r => isSuspended(r.id)) ? '<br>※ 運休の可能性は、走っているはずのバスが位置データに見当たらないことからの推測です。' : ''}</p>`;
+  sheet.style.display = 'block';
+  sheet.querySelectorAll('.route').forEach(b => b.onclick = () => {
+    const r = routeById(b.dataset.id), st = ojiStopsOf(r)[0];
+    if (st) { openStop(st); cluster.zoomToShowLayer(pins[st.id]); }
+    selRoute = null; highlight(r.id);
+  });
+  document.getElementById('close').onclick = closeStop;
+  map.invalidateSize();
+}
+document.getElementById('delays').onclick = showDelays;
+// 遅れのある路線の数をボタンに出す
+function updateDelayButton() {
+  const n = data.routes.filter(r => isAlert(r.id) && (dir === 'from' ? r.fromOji !== false : r.toOji !== false)).length;
+  const b = document.getElementById('delays');
+  b.textContent = n ? `遅れ ${n}` : '遅れ';
+  b.classList.toggle('alert', n > 0);
 }
 
 function runSearch() {
@@ -221,13 +257,15 @@ async function loadStatus() {
     const d = await res.json();
     if (d.error || !d.patterns) throw new Error(d.error || 'empty');
     status = d.patterns;
+    statusAt = d.updated ? new Date(d.updated) : new Date();
   } catch (e) {
     console.error(e);
     return;
   }
   restyle();
   data.stops.forEach(s => pins[s.id].setIcon(pinIcon(s)));
-  if (sheet.style.display === 'block') { if (currentStop) openStop(currentStop); else if (query) showResults(); }
+  updateDelayButton();
+  if (sheet.style.display === 'block') { if (currentStop) openStop(currentStop); else if (delayMode) showDelays(); else if (query) showResults(); }
 }
 
 function stopLabel(s) { return s.name + (s.num ? ` ${s.num}番乗り場` : ''); }
@@ -296,7 +334,8 @@ function applyFilter() {
   });
   if (selRoute && !isVisible(routeById(selRoute))) selRoute = null;
   restyle();
-  if (sheet.style.display === 'block') { if (currentStop) openStop(currentStop); else if (query) showResults(); }
+  updateDelayButton();
+  if (sheet.style.display === 'block') { if (currentStop) openStop(currentStop); else if (delayMode) showDelays(); else if (query) showResults(); }
 }
 
 document.getElementById('dirFrom').onclick = () => { dir = 'from'; savePref('dir', dir); applyFilter(); };
@@ -314,7 +353,7 @@ function toggleFav(title) {
 function showMsgFor(t) { showMsg(t); setTimeout(() => { msg.style.display = 'none'; }, 3500); }
 
 function openStop(s) {
-  currentStop = s;
+  currentStop = s; delayMode = false;
   const prev = selStop;
   selStop = s.id;
   if (prev && prev !== s.id) pins[prev].setIcon(pinIcon(stopById[prev]));
@@ -342,7 +381,7 @@ function openStop(s) {
 }
 
 function closeStop() {
-  currentStop = null;
+  currentStop = null; delayMode = false;
   const prev = selStop;
   selStop = null;
   if (prev) pins[prev].setIcon(pinIcon(stopById[prev]));
