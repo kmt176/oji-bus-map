@@ -35,6 +35,12 @@
   #bar .seg button { flex:1; }
   #bar .seg button:first-child { border-radius:10px 0 0 10px; }
   #bar .seg button:last-child { border-radius:0 10px 10px 0; border-left:none; }
+  #search { display:flex; gap:8px; padding:0 14px 8px; border-bottom:1px solid var(--line); }
+  #search input { flex:1; min-width:0; font-size:17px; padding:10px 12px; border:2px solid var(--line); border-radius:10px; }
+  #search button { flex:none; width:52px; font-size:22px; border:2px solid var(--line); border-radius:10px; background:#fff; }
+  #search button.on { border-color:var(--alert); }
+  #bar { border-bottom:none !important; }
+  .route small { display:block; color:var(--sub); font-size:14px; margin-top:2px; }
   .row { display:flex; gap:6px; align-items:stretch; margin:6px 0; }
   .row .route { margin:0; }
   .star { flex:none; width:52px; font-size:26px; border:1px solid var(--line); border-radius:10px; background:#fff; color:#bbb; }
@@ -66,6 +72,10 @@
 <div id="bar">
   <div class="seg"><button id="dirFrom">王子駅から</button><button id="dirTo">王子駅へ</button></div>
   <button id="favOnly">★だけ</button>
+</div>
+<div id="search">
+  <input id="q" type="search" placeholder="行き先・通る停留所で探す（例：池袋）" enterkeyhint="search" autocomplete="off">
+  <button id="mic" aria-label="声で入力">🎤</button>
 </div>
 <div id="map"></div>
 <div id="msg"></div>
@@ -108,8 +118,65 @@ const alongRenderer = L.canvas({ tolerance:12 }); // 小さな丸でも指で押
 
 function isVisible(r) {
   const okDir = dir === 'from' ? r.fromOji !== false : r.toOji !== false;
-  return okDir && (!favOnly || favs.has(r.title));
+  return okDir && (!favOnly || favs.has(r.title)) && matchesQuery(r);
 }
+
+// ===== 行き先・停留所名で探す =====
+let query = '';
+// ひらがなをカタカナにそろえ、空白と「行き」「まで」などの言い回しを取る
+function norm(t) {
+  return String(t || '').replace(/[\s　]/g, '')
+    .replace(/(に行きたい|へ行きたい|に行く|へ行く|行きのバス|のバス|行き|ゆき|方面|まで|行|へ)$/, '')
+    .replace(/[\u3041-\u3096]/g, c => String.fromCharCode(c.charCodeAt(0) + 0x60));
+}
+function matchesQuery(r) { return !query || r.names.includes(query); }
+// その路線に乗る王子駅の乗り場
+function ojiStopsOf(r) { return data.stops.filter(s => s.routes.includes(r.id)); }
+
+function showResults() {
+  currentStop = null;
+  const rs = data.routes.filter(isVisible).sort((a, b) => a.title.localeCompare(b.title, 'ja'));
+  const shown = document.getElementById('q').value.trim();
+  sheet.innerHTML = `<h2>「${esc(shown)}」へ行く路線 ${rs.length}件<button id="close">閉じる</button></h2>` +
+    (rs.length ? rs.map(r => {
+      const c = isAlert(r.id) ? ALERT : colorOf[r.title];
+      const st = ojiStopsOf(r);
+      const where = st.length ? '乗り場：' + st.map(stopLabel).join('、') : '';
+      return `<div class="row"><button class="route" data-id="${esc(r.id)}" style="border-color:${c}">
+        <i class="chip" style="background:${c}"></i><b>${esc(r.title)}</b><span>${esc(destOf(r))}<small>${esc(where)}</small></span>${alertText(r.id) ? `<em>${esc(alertText(r.id))}</em>` : ''}</button></div>`;
+    }).join('') : `<p>見つかりませんでした。行き先か、王子駅から4km以内の停留所名で探せます。${dir === 'from' ? '' : '（今は「王子駅へ」を表示中です）'}</p>`);
+  sheet.style.display = 'block';
+  sheet.querySelectorAll('.route').forEach(b => b.onclick = () => {
+    const r = routeById(b.dataset.id), st = ojiStopsOf(r)[0];
+    if (st) { openStop(st); cluster.zoomToShowLayer(pins[st.id]); }
+    selRoute = null; highlight(r.id);
+  });
+  document.getElementById('close').onclick = closeStop;
+  map.invalidateSize();
+}
+
+function runSearch() {
+  query = norm(document.getElementById('q').value);
+  applyFilter();
+  if (query) showResults(); else closeStop();
+}
+let searchTimer;
+document.getElementById('q').addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 300); });
+document.getElementById('q').addEventListener('keydown', e => { if (e.key === 'Enter') { e.target.blur(); runSearch(); } });
+
+// 声で入力（対応しているブラウザだけボタンを出す）
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const micBtn = document.getElementById('mic');
+if (!SR) micBtn.style.display = 'none';
+else micBtn.onclick = () => {
+  const rec = new SR();
+  rec.lang = 'ja-JP'; rec.interimResults = false; rec.maxAlternatives = 1;
+  micBtn.classList.add('on');
+  rec.onresult = e => { document.getElementById('q').value = e.results[0][0].transcript.replace(/[。、]$/, ''); runSearch(); };
+  rec.onend = () => micBtn.classList.remove('on');
+  rec.onerror = () => { micBtn.classList.remove('on'); showMsgFor('声を聞き取れませんでした。もう一度押して話してください'); };
+  rec.start();
+};
 function routeById(id) { return data.routes.find(r => r.id === id); }
 
 function showMsg(t) { msg.textContent = t; msg.style.display = 'block'; }
@@ -160,7 +227,7 @@ async function loadStatus() {
   }
   restyle();
   data.stops.forEach(s => pins[s.id].setIcon(pinIcon(s)));
-  if (currentStop) openStop(currentStop);
+  if (sheet.style.display === 'block') { if (currentStop) openStop(currentStop); else if (query) showResults(); }
 }
 
 function stopLabel(s) { return s.name + (s.num ? ` ${s.num}番乗り場` : ''); }
@@ -177,6 +244,14 @@ function draw() {
   // 系統名（例：王40）ごとに色を決める
   const titles = [...new Set(data.routes.map(r => r.title))].sort();
   titles.forEach((t, i) => colorOf[t] = PALETTE[i % PALETTE.length]);
+
+  // 探すときに使う名前：系統名・行き先・途中の停留所名
+  data.routes.forEach((r, i) => {
+    const names = [r.title, r.note, r.dest];
+    (data.along || []).forEach(a => { if (a.routes.includes(i)) names.push(a.name); });
+    data.stops.forEach(s => { if (s.routes.includes(r.id)) names.push(s.name); });
+    r.names = names.map(norm).join('|');
+  });
 
   data.routes.forEach(r => {
     lines[r.id] = L.polyline(r.path, { color:colorOf[r.title], weight:5, opacity:.8 })
@@ -221,7 +296,7 @@ function applyFilter() {
   });
   if (selRoute && !isVisible(routeById(selRoute))) selRoute = null;
   restyle();
-  if (sheet.style.display === 'block' && currentStop) openStop(currentStop);
+  if (sheet.style.display === 'block') { if (currentStop) openStop(currentStop); else if (query) showResults(); }
 }
 
 document.getElementById('dirFrom').onclick = () => { dir = 'from'; savePref('dir', dir); applyFilter(); };
