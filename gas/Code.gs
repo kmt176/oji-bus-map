@@ -273,7 +273,7 @@ function status_() {
       var t = p.trips[tid].filter(function (v) { return v >= 0; });
       if (t.length && t[0] <= now && now <= t[t.length - 1]) expected++;
     });
-    out[id] = { delay: null, buses: 0, expected: expected, suspended: false };
+    out[id] = { delay: null, buses: 0, checked: 0, expected: expected, suspended: false };
   });
 
   buses.forEach(function (b) {
@@ -281,6 +281,7 @@ function status_() {
     if (!out[id] || !tt[id]) return;
     out[id].buses++;
     var d = busDelay_(b, tt[id], now);
+    if (d != null) out[id].checked++;
     if (d != null && (out[id].delay == null || d > out[id].delay)) out[id].delay = d;
   });
 
@@ -418,11 +419,39 @@ function testStatus() {
   var d = JSON.parse(status_());
   var ps = d.patterns, ids = Object.keys(ps);
   var running = ids.filter(function (id) { return ps[id].buses > 0; }).length;
+  var sum = function (k) { return ids.reduce(function (n, id) { return n + (ps[id][k] || 0); }, 0); };
   Logger.log('走行データ ' + (d.feedOk ? '正常' : '不調') + ' / 路線 ' + ids.length + ' 件中 ' + running + ' 件でバスを確認');
+  Logger.log('対象路線のバス ' + sum('buses') + ' 台のうち、時刻表と比べられたのは ' + sum('checked') + ' 台 / 時刻表上いま走っているはずの便 ' + sum('expected') + ' 便');
   ids.forEach(function (id) {
     var o = ps[id];
-    if (o.delay || o.suspended) {
-      Logger.log(id + ' 遅れ ' + o.delay + ' 分 / 走行 ' + o.buses + ' 台 / 予定 ' + o.expected + ' 便' + (o.suspended ? ' / 運休の可能性' : ''));
+    if (o.buses || o.suspended) {
+      Logger.log(id.replace('odpt.BusroutePattern:Toei.', '') + '：走行 ' + o.buses + ' 台 / 比較 ' + o.checked + ' 台 / 遅れ ' +
+                 (o.delay == null ? '-' : o.delay + ' 分') + ' / 予定 ' + o.expected + ' 便' + (o.suspended ? ' / 運休の可能性' : ''));
     }
   });
+}
+
+/** エディタから実行して動作確認する用：時刻表の種類と、バスの位置データの中身をログに出す */
+function testTimetable() {
+  var key = PropertiesService.getScriptProperties().getProperty('ODPT_KEY');
+  var day = serviceDay_();
+  Logger.log('運行日 ' + day.key + ' / 使う時刻表の種類 ' + day.calendars.join(', '));
+  var ids = JSON.parse(cacheGet_(CACHE_KEY) || JSON.stringify(build_())).routes.map(function (r) { return r.id; });
+  var raw = odpt_('odpt:BusTimetable', { 'odpt:busroutePattern': ids[0] }, key);
+  var cals = {};
+  raw.forEach(function (t) { cals[t['odpt:calendar']] = (cals[t['odpt:calendar']] || 0) + 1; });
+  Logger.log(ids[0] + ' の時刻表 ' + raw.length + ' 便 / 種類 ' + JSON.stringify(cals));
+  var tt = timetables_(ids, false);
+  var trips = ids.reduce(function (n, id) { return n + Object.keys((tt[id] || { trips: {} }).trips).length; }, 0);
+  Logger.log('今日の時刻表として読めた便 ' + trips + ' 便（' + ids.length + ' 路線）');
+  var buses = odpt_('odpt:Bus', { 'odpt:operator': 'odpt.Operator:Toei' }, key);
+  var mine = buses.filter(function (b) { return ids.indexOf(b['odpt:busroutePattern']) >= 0; });
+  Logger.log('都営バス全体 ' + buses.length + ' 台 / 対象路線 ' + mine.length + ' 台');
+  if (mine[0]) {
+    var b = mine[0];
+    Logger.log('例：' + JSON.stringify({
+      pattern: b['odpt:busroutePattern'], timetable: b['odpt:busTimetable'] || null,
+      from: b['odpt:fromBusstopPole'] || null, fromTime: b['odpt:fromBusstopPoleTime'] || null, to: b['odpt:toBusstopPole'] || null
+    }));
+  }
 }
