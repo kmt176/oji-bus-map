@@ -18,7 +18,7 @@ var ODPT_BASE = 'https://api.odpt.org/api/v4/';
 var OJI = { lat: 35.75282, lng: 139.73784 }; // 王子駅
 var STOP_RADIUS = 350;   // この範囲の乗り場をピンにする（m）
 var LINE_RADIUS = 4000;  // 路線の線を描く範囲（m、ODPT の上限）
-var CACHE_KEY = 'oji_v2';
+var CACHE_KEY = 'oji_v3';
 var OSRM_BASE = 'https://router.project-osrm.org/route/v1/driving/';
 var CACHE_SEC = 6 * 60 * 60;
 
@@ -77,9 +77,26 @@ function build_() {
   }
 
   // 4) 返すデータを小さくまとめる
-  var routes = patterns.map(function (pt) {
+  var nearSet = {};
+  near.forEach(function (p) { nearSet[p['owl:sameAs']] = true; });
+  var alongIdx = {}, along = [];   // 線の途中のバス停（王子駅の乗り場以外）
+  var routes = patterns.map(function (pt, ri) {
     var order = (pt['odpt:busstopPoleOrder'] || []).slice().sort(function (a, b) {
       return a['odpt:index'] - b['odpt:index'];
+    });
+    // 王子駅の乗り場が並びのどこにあるかで、王子駅から出る／王子駅へ来るを決める
+    var ojiPos = [];
+    order.forEach(function (o, k) {
+      var pid = o['odpt:busstopPole'];
+      if (nearSet[pid]) { ojiPos.push(k); return; }
+      var p = poleById[pid];
+      if (!p) return;
+      if (alongIdx[pid] == null) {
+        alongIdx[pid] = along.length;
+        along.push({ name: p['dc:title'] || '', lat: round_(p['geo:lat']), lng: round_(p['geo:long']), routes: [] });
+      }
+      var a = along[alongIdx[pid]];
+      if (a.routes.indexOf(ri) < 0) a.routes.push(ri);
     });
     // 周辺 4km にある乗り場だけで線を作る（範囲外は途切れる）
     var path = [], seg = [];
@@ -95,6 +112,8 @@ function build_() {
       title: pt['dc:title'] || '',
       note: pt['odpt:note'] || '',
       dest: last ? last['dc:title'] : '',
+      fromOji: ojiPos.length > 0 && ojiPos[0] < order.length - 1,
+      toOji: ojiPos.length > 0 && ojiPos[ojiPos.length - 1] > 0,
       path: path
     };
   });
@@ -120,7 +139,8 @@ function build_() {
     };
   });
 
-  return { updated: new Date().toISOString(), center: OJI, stops: stops, routes: routes };
+  // along[].routes は routes の並び番号
+  return { updated: new Date().toISOString(), center: OJI, stops: stops, routes: routes, along: along };
 }
 
 /**

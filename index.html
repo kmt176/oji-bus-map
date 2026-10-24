@@ -28,6 +28,17 @@
   #sheet { border-top:1px solid var(--line); max-height:45vh; overflow:auto; padding:12px 14px calc(12px + env(safe-area-inset-bottom)); display:none; }
   #sheet h2 { margin:0 0 8px; font-size:20px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
   #sheet h2 button { flex:none; font-size:16px; padding:8px 14px; border:1px solid var(--line); background:#fff; border-radius:8px; }
+  #bar { display:flex; gap:8px; padding:8px 14px; border-bottom:1px solid var(--line); }
+  #bar button { font-size:16px; padding:10px 12px; border:2px solid var(--line); background:#fff; color:var(--ink); border-radius:10px; }
+  #bar button.on { border-color:var(--ink); background:var(--ink); color:#fff; }
+  #bar .seg { display:flex; flex:1; }
+  #bar .seg button { flex:1; }
+  #bar .seg button:first-child { border-radius:10px 0 0 10px; }
+  #bar .seg button:last-child { border-radius:0 10px 10px 0; border-left:none; }
+  .row { display:flex; gap:6px; align-items:stretch; margin:6px 0; }
+  .row .route { margin:0; }
+  .star { flex:none; width:52px; font-size:26px; border:1px solid var(--line); border-radius:10px; background:#fff; color:#bbb; }
+  .star.on { color:#e0a800; }
   .route { display:flex; align-items:center; gap:10px; width:100%; text-align:left; font-size:18px; padding:12px 10px; margin:6px 0; border:1px solid var(--line); border-radius:10px; background:#fff; color:var(--ink); }
   .route.on { border-width:3px; }
   .chip { flex:none; width:14px; height:28px; border-radius:4px; }
@@ -35,24 +46,27 @@
   .route span { color:var(--sub); font-size:16px; }
   .route em { margin-left:auto; flex:none; font-style:normal; font-weight:700; font-size:16px; color:var(--alert); }
   .note { color:var(--sub); font-size:13px; margin:8px 2px 0; }
-  /* 乗り場のピン：指で押しやすい高さ 44px、乗り場名と番号を表示 */
-  .pin { position:absolute; left:0; top:0; transform:translate(-50%,-100%); display:flex; align-items:center; gap:6px; white-space:nowrap;
-         min-height:44px; padding:4px 12px 4px 4px; border-radius:22px; background:#fff; border:3px solid var(--ink);
-         font-size:15px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.3); }
-  .pin::after { content:""; position:absolute; left:50%; bottom:-10px; transform:translateX(-50%); border:7px solid transparent; border-top-color:var(--ink); }
-  .pin i { font-style:normal; display:flex; align-items:center; justify-content:center; min-width:32px; height:32px; border-radius:16px; background:var(--ink); color:#fff; font-size:16px; }
-  .pin.sel { background:var(--ink); color:#fff; }
-  .pin.sel i { background:#fff; color:var(--ink); }
-  .pin.alert { border-color:var(--alert); }
-  .pin.alert i { background:var(--alert); }
-  .pin.alert::after { border-top-color:var(--alert); }
+  /* 乗り場のピン：番号の丸（指で押しやすい 44px）の下に乗り場名 */
+  .pin { position:absolute; left:0; top:0; transform:translate(-50%,-22px); display:flex; flex-direction:column; align-items:center; }
+  .pin i { font-style:normal; display:flex; align-items:center; justify-content:center; width:44px; height:44px; border-radius:50%;
+           background:#fff; border:3px solid var(--ink); color:var(--ink); font-size:18px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.3); }
+  .pin span { margin-top:2px; font-size:13px; font-weight:700; white-space:nowrap; color:var(--ink);
+              text-shadow:0 0 3px #fff, 0 0 3px #fff, 0 0 3px #fff; }
+  .pin.sel i { background:var(--ink); color:#fff; }
+  .pin.alert i { border-color:var(--alert); color:var(--alert); }
+  .pin.sel.alert i { background:var(--alert); color:#fff; }
   /* まとめ表示（ズームアウト時） */
-  .cluster { display:flex; align-items:center; justify-content:center; width:52px; height:52px; border-radius:50%; background:#fff; border:3px solid var(--ink);
+  .cluster small { font-size:11px; margin-top:2px; }
+  .cluster { display:flex; flex-direction:column; align-items:center; justify-content:center; line-height:1; width:56px; height:56px; border-radius:50%; background:var(--ink); color:#fff; border:3px solid #fff;
              font-size:18px; font-weight:700; box-shadow:0 1px 4px rgba(0,0,0,.3); }
 </style>
 </head>
 <body>
 <header><h1>王子駅バス地図</h1><small>都営バスのみ表示</small></header>
+<div id="bar">
+  <div class="seg"><button id="dirFrom">王子駅から</button><button id="dirTo">王子駅へ</button></div>
+  <button id="favOnly">★だけ</button>
+</div>
 <div id="map"></div>
 <div id="msg"></div>
 <div id="sheet"></div>
@@ -73,14 +87,30 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 
 // 近い乗り場はまとめて表示し、ズームすると分かれる。最大ズームでも重なるときはタップで広がる
 const cluster = L.markerClusterGroup({
-  maxClusterRadius: z => z >= 19 ? 45 : 70, spiderfyOnMaxZoom:true, showCoverageOnHover:false, spiderfyDistanceMultiplier:2.2,
-  iconCreateFunction: c => L.divIcon({ className:'', html:`<div class="cluster">${c.getChildCount()}</div>`, iconSize:[52,52], iconAnchor:[26,26] })
+  maxClusterRadius:80, spiderfyOnMaxZoom:true, showCoverageOnHover:false, spiderfyDistanceMultiplier:3,
+  iconCreateFunction: c => L.divIcon({ className:'', html:`<div class="cluster">${c.getChildCount()}<small>乗り場</small></div>`, iconSize:[56,56], iconAnchor:[28,28] })
 }).addTo(map);
 
 const msg = document.getElementById('msg');
 const sheet = document.getElementById('sheet');
+let currentStop = null;
 let data, colorOf = {}, lines = {}, pins = {}, stopById = {}, selStop = null, selRoute = null;
 let status = {}; // 路線パターンID → { delay, suspended, ... }
+let along = [];   // 線の途中のバス停の丸
+
+// 表示の設定（このスマホに覚えておく）
+function loadPref(k, def) { try { const v = localStorage.getItem('ojibus.' + k); return v == null ? def : JSON.parse(v); } catch (e) { return def; } }
+function savePref(k, v) { try { localStorage.setItem('ojibus.' + k, JSON.stringify(v)); } catch (e) {} }
+let dir = loadPref('dir', 'from');          // 'from'＝王子駅から、'to'＝王子駅へ
+let favOnly = loadPref('favOnly', false);   // ★の付いた系統だけ表示
+let favs = new Set(loadPref('favs', []));   // ★を付けた系統名（例：王40）
+const alongRenderer = L.canvas({ tolerance:12 }); // 小さな丸でも指で押しやすくする
+
+function isVisible(r) {
+  const okDir = dir === 'from' ? r.fromOji !== false : r.toOji !== false;
+  return okDir && (!favOnly || favs.has(r.title));
+}
+function routeById(id) { return data.routes.find(r => r.id === id); }
 
 function showMsg(t) { msg.textContent = t; msg.style.display = 'block'; }
 function esc(s) { return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -130,7 +160,7 @@ async function loadStatus() {
   }
   restyle();
   data.stops.forEach(s => pins[s.id].setIcon(pinIcon(s)));
-  if (selStop) openStop(stopById[selStop]);
+  if (currentStop) openStop(currentStop);
 }
 
 function stopLabel(s) { return s.name + (s.num ? ` ${s.num}番乗り場` : ''); }
@@ -139,8 +169,8 @@ function pinIcon(s) {
   const cls = ['pin'];
   if (s.id === selStop) cls.push('sel');
   if (s.routes.some(isAlert)) cls.push('alert');
-  return L.divIcon({ className:'', iconSize:[0,0], iconAnchor:[0,10],
-    html:`<div class="${cls.join(' ')}"><i>${esc(s.num || '●')}</i>${esc(s.name)}</div>` });
+  return L.divIcon({ className:'', iconSize:[0,0], iconAnchor:[0,0],
+    html:`<div class="${cls.join(' ')}"><i>${esc(s.num || '●')}</i><span>${esc(s.name)}</span></div>` });
 }
 
 function draw() {
@@ -160,33 +190,84 @@ function draw() {
     cluster.addLayer(pins[s.id]);
     bounds.push([s.lat, s.lng]);
   });
+  // 線の途中のバス停：小さな丸。押すと停留所名と通る路線が出る
+  (data.along || []).forEach(a => {
+    const s = { id:null, name:a.name, num:'', along:true, routes:a.routes.map(i => data.routes[i] && data.routes[i].id).filter(Boolean) };
+    s.marker = L.circleMarker([a.lat, a.lng], { renderer:alongRenderer, radius:6, weight:2, color:'#222', fillColor:'#fff', fillOpacity:1 })
+      .on('click', () => openStop(s));
+    along.push(s);
+  });
+  map.on('zoomend', applyFilter);
+
   if (bounds.length) map.fitBounds(bounds, { padding:[40,40], maxZoom:17 });
+  applyFilter();
 }
 
+// 向き・★の設定に合わせて、線と途中のバス停を出し入れする
+function applyFilter() {
+  document.getElementById('dirFrom').classList.toggle('on', dir === 'from');
+  document.getElementById('dirTo').classList.toggle('on', dir === 'to');
+  document.getElementById('favOnly').classList.toggle('on', favOnly);
+  data.routes.forEach(r => {
+    const l = lines[r.id];
+    if (isVisible(r)) { if (!map.hasLayer(l)) l.addTo(map); }
+    else if (map.hasLayer(l)) l.remove();
+  });
+  const showAlong = map.getZoom() >= 15;
+  along.forEach(s => {
+    const on = showAlong && s.routes.some(id => isVisible(routeById(id)));
+    if (on && !map.hasLayer(s.marker)) s.marker.addTo(map);
+    else if (!on && map.hasLayer(s.marker)) s.marker.remove();
+  });
+  if (selRoute && !isVisible(routeById(selRoute))) selRoute = null;
+  restyle();
+  if (sheet.style.display === 'block' && currentStop) openStop(currentStop);
+}
+
+document.getElementById('dirFrom').onclick = () => { dir = 'from'; savePref('dir', dir); applyFilter(); };
+document.getElementById('dirTo').onclick = () => { dir = 'to'; savePref('dir', dir); applyFilter(); };
+document.getElementById('favOnly').onclick = () => {
+  favOnly = !favOnly; savePref('favOnly', favOnly);
+  if (favOnly && !favs.size) showMsgFor('乗り場や路線を押して、よく使う路線に★を付けてください');
+  applyFilter();
+};
+function toggleFav(title) {
+  favs.has(title) ? favs.delete(title) : favs.add(title);
+  savePref('favs', [...favs]);
+  applyFilter();
+}
+function showMsgFor(t) { showMsg(t); setTimeout(() => { msg.style.display = 'none'; }, 3500); }
+
 function openStop(s) {
+  currentStop = s;
   const prev = selStop;
   selStop = s.id;
   if (prev && prev !== s.id) pins[prev].setIcon(pinIcon(stopById[prev]));
-  pins[s.id].setIcon(pinIcon(s));
+  if (s.id) pins[s.id].setIcon(pinIcon(s));
 
-  const rs = s.routes.map(id => data.routes.find(r => r.id === id)).filter(Boolean)
-    .sort((a, b) => a.title.localeCompare(b.title, 'ja'));
+  // ★を付けた系統を上に、あとは系統名の順
+  const rs = s.routes.map(routeById).filter(r => r && isVisible(r))
+    .sort((a, b) => (favs.has(b.title) - favs.has(a.title)) || a.title.localeCompare(b.title, 'ja'));
   const anySuspended = rs.some(r => isSuspended(r.id));
   sheet.innerHTML = `<h2>${esc(stopLabel(s))}<button id="close">閉じる</button></h2>` +
     (rs.length ? rs.map(r => {
        const c = isAlert(r.id) ? ALERT : colorOf[r.title];
-       return `<button class="route" data-id="${esc(r.id)}" style="border-color:${c}">
-         <i class="chip" style="background:${c}"></i><b>${esc(r.title)}</b><span>${esc(destOf(r))}</span>${alertText(r.id) ? `<em>${esc(alertText(r.id))}</em>` : ''}</button>`;
-     }).join('') : '<p>この乗り場の路線情報はありません</p>') +
+       const fav = favs.has(r.title);
+       return `<div class="row"><button class="route" data-id="${esc(r.id)}" style="border-color:${c}">
+         <i class="chip" style="background:${c}"></i><b>${esc(r.title)}</b><span>${esc(destOf(r))}</span>${alertText(r.id) ? `<em>${esc(alertText(r.id))}</em>` : ''}</button>
+         <button class="star${fav ? ' on' : ''}" data-title="${esc(r.title)}" aria-label="${esc(r.title)}をよく使う路線にする">${fav ? '★' : '☆'}</button></div>`;
+     }).join('') : `<p>${favOnly ? '★を付けた路線はこの乗り場を通りません' : (dir === 'from' ? 'ここから王子駅を出る路線はありません' : 'ここから王子駅へ向かう路線はありません')}</p>`) +
     (anySuspended ? '<p class="note">※ 走っているはずのバスが位置データに見当たらないため、運休と推測しています。実際の運行とは異なる場合があります。</p>' : '');
   sheet.style.display = 'block';
   sheet.querySelectorAll('.route').forEach(b => b.onclick = () => highlight(b.dataset.id));
+  sheet.querySelectorAll('.star').forEach(b => b.onclick = () => toggleFav(b.dataset.title));
   document.getElementById('close').onclick = closeStop;
   markRoute();
   map.invalidateSize();
 }
 
 function closeStop() {
+  currentStop = null;
   const prev = selStop;
   selStop = null;
   if (prev) pins[prev].setIcon(pinIcon(stopById[prev]));
@@ -209,11 +290,11 @@ function restyle() {
     const color = isAlert(rid) ? ALERT : colorOf[r.title];
     const dashArray = isSuspended(rid) ? '10 8' : null;
     if (!selRoute) l.setStyle({ color, dashArray, weight:5, opacity:.8 });
-    else if (rid === selRoute) { l.setStyle({ color, dashArray, weight:9, opacity:1 }); l.bringToFront(); }
+    else if (rid === selRoute) { l.setStyle({ color, dashArray, weight:9, opacity:1 }); if (map.hasLayer(l)) l.bringToFront(); }
     else l.setStyle({ color, dashArray, weight:3, opacity:.12 });
   });
   // 遅れのある線は上に重ねて見えやすくする
-  if (!selRoute) Object.keys(lines).filter(isAlert).forEach(rid => lines[rid].bringToFront());
+  if (!selRoute) Object.keys(lines).filter(isAlert).forEach(rid => { if (map.hasLayer(lines[rid])) lines[rid].bringToFront(); });
 }
 
 function markRoute() {
