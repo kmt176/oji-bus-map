@@ -335,12 +335,20 @@ function busDelay_(b, p, now) {
  */
 function timetables_(ids, force) {
   var day = serviceDay_();
-  var ckey = 'oji_tt_' + day.key;
+  var ckey = 'oji_tt2_' + day.key;
   if (!force) {
     var c = cacheGet_(ckey);
     if (c) return JSON.parse(c);
   }
   var key = PropertiesService.getScriptProperties().getProperty('ODPT_KEY');
+  // いま走っているバスの便IDに入っている時刻表の種類（例：49-160）も今日の分として使う
+  try {
+    odpt_('odpt:Bus', { 'odpt:operator': 'odpt.Operator:Toei' }, key).forEach(function (b) {
+      var m = String(b['odpt:busTimetable'] || '').match(/-(\d+-\d+)-\d+$/);
+      var cal = m && 'odpt.Calendar:Specific.Toei.' + m[1];
+      if (cal && day.calendars.indexOf(cal) < 0) day.calendars.push(cal);
+    });
+  } catch (err) {}
   var out = {};
   var reqs = ids.map(function (id) {
     return { url: url_('odpt:BusTimetable', { 'odpt:busroutePattern': id }, key), muteHttpExceptions: true };
@@ -382,9 +390,10 @@ function serviceDay_() {
   var ymd = Utilities.formatDate(d, 'Asia/Tokyo', 'yyyy-MM-dd');
   var dow = Number(Utilities.formatDate(d, 'Asia/Tokyo', 'u')); // 1=月 … 7=日
   var holiday = dow === 7 || isHoliday_(ymd);
-  var cals = holiday ? ['odpt.Calendar:Holiday', 'odpt.Calendar:SaturdayHoliday', 'odpt.Calendar:Sunday']
-           : dow === 6 ? ['odpt.Calendar:Saturday', 'odpt.Calendar:SaturdayHoliday']
-           : ['odpt.Calendar:Weekday'];
+  // 都営バスは独自の種類を使う（49-100＝平日、49-160＝土曜、49-170＝日曜・休日）
+  var cals = holiday ? ['odpt.Calendar:Holiday', 'odpt.Calendar:SaturdayHoliday', 'odpt.Calendar:Sunday', 'odpt.Calendar:Specific.Toei.49-170']
+           : dow === 6 ? ['odpt.Calendar:Saturday', 'odpt.Calendar:SaturdayHoliday', 'odpt.Calendar:Specific.Toei.49-160']
+           : ['odpt.Calendar:Weekday', 'odpt.Calendar:Specific.Toei.49-100'];
   return { key: ymd, calendars: cals };
 }
 
